@@ -115,6 +115,33 @@
   .prop-tile .v { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .prop-tile .u { font-size: 11px; color: var(--text-dim); margin-left: 3px; font-weight: 400; }
   .footer-note { color: var(--text-dim); font-size: 11px; margin-top: 26px; border-top: 1px solid var(--border); padding-top: 12px; }
+
+  .chart-card { position: relative; }
+  .chart-card svg { display: block; }
+  .chart-axis-label { fill: var(--text-dim); font-size: 10px; }
+  .chart-grid { stroke: #2c3a48; stroke-width: 1; }
+  .chart-baseline { stroke: #383835; stroke-width: 1; }
+  .chart-tooltip {
+    position: absolute; pointer-events: none; background: #0b1219; border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 9px; font-size: 11.5px; line-height: 1.5; color: var(--text);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.4); z-index: 5; white-space: nowrap;
+  }
+  .chart-legend { display: flex; gap: 16px; font-size: 11.5px; color: var(--text-dim); margin-top: 6px; flex-wrap: wrap; }
+  .chart-legend .mk { display: inline-flex; align-items: center; gap: 5px; }
+  .run-bar { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+  .btn-primary {
+    background: var(--accent); color: #06202f; border: none; border-radius: 7px; padding: 9px 18px;
+    font-size: 13px; font-weight: 700; cursor: pointer;
+  }
+  .btn-primary:disabled { opacity: 0.5; cursor: default; }
+  .btn-secondary {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 7px;
+    padding: 9px 14px; font-size: 12.5px; cursor: pointer;
+  }
+  .progress-track { flex: 1; height: 8px; background: var(--panel-2); border-radius: 999px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); transition: width 0.15s linear; }
+  .table-scroll { max-height: 260px; overflow-y: auto; margin-top: 10px; border-radius: 8px; }
+  .small-muted { color: var(--text-dim); font-size: 11.5px; }
 </style>
 </head>
 <body>
@@ -370,6 +397,148 @@ function optimize(code, inp) {
 }
 
 /* ============================================================================
+   PHASE 2 -- BAYESIAN REFINEMENT PROTOTYPE (PRD Section 7.2)
+   Mirrors bayesian_optimization.py term-for-term: same continuous (d, bf)
+   proxy design (tf=d/30, tw=d/50, thin-wall, NO weld -- distinct from the
+   weld-inclusive builtUpProperties() model used in the Section Properties
+   tab below), same penalized-weight objective, same RBF-kernel GP + LCB
+   acquisition loop. Linear algebra (Gauss-Jordan inverse) is hand-rolled
+   here instead of numpy -- still no third-party dependency.
+   Status: illustrative Phase 2 seed, not wired into Phase 1 acceptance
+   criteria (same caveat as the Python prototype).
+   ========================================================================= */
+const STEEL_DENSITY_KG_MM3 = 7.85e-6;
+
+function proxyDesign(d, bf) {
+  const tf = d / 30.0, tw = d / 50.0;
+  const A = 2 * bf * tf + (d - 2 * tf) * tw;
+  const weight = A * STEEL_DENSITY_KG_MM3 * 1000.0; // kg/m
+  const Ix = (bf * Math.pow(d, 3)) / 12 - ((bf - tw) * Math.pow(d - 2 * tf, 3)) / 12;
+  const Zx = bf * tf * (d - tf) + (tw * Math.pow(d - 2 * tf, 2)) / 4;
+  const diagonal = Math.hypot(d, bf);
+  return { d, bf, tf, tw, A, weight, Ix, Zx, diagonal };
+}
+
+function proxyEvaluate(d, bf, problem) {
+  const des = proxyDesign(d, bf);
+  const MpKNm = (problem.fy * des.Zx) / 1e6; // fy MPa, Zx mm^3 -> N*mm -> kN*m
+  const fitViolation = Math.max(0, des.diagonal - problem.dNet) / problem.dNet;
+  const capViolation = Math.max(0, problem.mDemand - MpKNm) / Math.max(problem.mDemand, 1e-6);
+  const penalty = problem.penaltyWeight * (fitViolation + capViolation);
+  const objective = des.weight + penalty;
+  const feasible = fitViolation === 0 && capViolation === 0;
+  return { design: des, MpKNm, objective, feasible, fitViolation, capViolation };
+}
+
+// ---- tiny linear algebra (Gauss-Jordan inverse, plain 2D arrays) --------
+function matInverse(M) {
+  const n = M.length;
+  const A = M.map((row, i) => row.concat(Array.from({ length: n }, (_, j) => (i === j ? 1 : 0))));
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(A[r][col]) > Math.abs(A[pivot][col])) pivot = r;
+    const tmp = A[col]; A[col] = A[pivot]; A[pivot] = tmp;
+    const pv = A[col][col] || 1e-12;
+    for (let j = 0; j < 2 * n; j++) A[col][j] /= pv;
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const factor = A[r][col];
+      if (factor === 0) continue;
+      for (let j = 0; j < 2 * n; j++) A[r][j] -= factor * A[col][j];
+    }
+  }
+  return A.map(row => row.slice(n));
+}
+function matVec(M, v) { return M.map(row => row.reduce((s, val, i) => s + val * v[i], 0)); }
+
+// ---- minimal RBF-kernel Gaussian Process (zero-mean, single length scale) --
+class SimpleGP {
+  constructor(lengthScale, sigmaF = 1.0, noise = 1e-3) {
+    this.lengthScale = lengthScale; this.sigmaF = sigmaF; this.noise = noise;
+  }
+  kernel(A, B) {
+    return A.map(a => B.map(b => {
+      const sq = Math.pow(a[0] - b[0], 2) + Math.pow(a[1] - b[1], 2);
+      return Math.pow(this.sigmaF, 2) * Math.exp(-0.5 * sq / Math.pow(this.lengthScale, 2));
+    }));
+  }
+  fit(X, y) {
+    this.X = X;
+    this.yMean = y.reduce((a, b) => a + b, 0) / y.length;
+    this.y = y.map(v => v - this.yMean);
+    const K = this.kernel(X, X).map((row, i) => row.map((v, j) => v + (i === j ? this.noise : 0)));
+    this.KInv = matInverse(K);
+    this.alpha = matVec(this.KInv, this.y);
+  }
+  predict(Xs) {
+    const Ks = this.kernel(Xs, this.X);
+    const mu = Ks.map(row => row.reduce((s, v, i) => s + v * this.alpha[i], 0) + this.yMean);
+    const sigma = Ks.map(row => {
+      const KInvRow = matVec(this.KInv, row);
+      const quad = row.reduce((s, v, i) => s + v * KInvRow[i], 0);
+      return Math.sqrt(Math.max(Math.pow(this.sigmaF, 2) - quad, 1e-12));
+    });
+    return { mu, sigma };
+  }
+}
+
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return function () {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+function initBO(problem, nInit, rng) {
+  const X = [], evals = [];
+  for (let i = 0; i < nInit; i++) {
+    const d = problem.dBounds[0] + rng() * (problem.dBounds[1] - problem.dBounds[0]);
+    const bf = problem.bfBounds[0] + rng() * (problem.bfBounds[1] - problem.bfBounds[0]);
+    X.push([d, bf]);
+    evals.push(proxyEvaluate(d, bf, problem));
+  }
+  return { X, y: evals.map(e => e.objective), evals };
+}
+
+function stepBO(state, problem, nCandidates, kappa, rng) {
+  const lengthScale = Math.max(
+    problem.dBounds[1] - problem.dBounds[0],
+    problem.bfBounds[1] - problem.bfBounds[0]
+  ) / 4.0;
+  const gp = new SimpleGP(lengthScale);
+  gp.fit(state.X, state.y);
+
+  const candidates = [];
+  for (let i = 0; i < nCandidates; i++) {
+    const d = problem.dBounds[0] + rng() * (problem.dBounds[1] - problem.dBounds[0]);
+    const bf = problem.bfBounds[0] + rng() * (problem.bfBounds[1] - problem.bfBounds[0]);
+    candidates.push([d, bf]);
+  }
+  const { mu, sigma } = gp.predict(candidates);
+  let bestIdx = 0, bestLcb = Infinity;
+  for (let i = 0; i < candidates.length; i++) {
+    const lcb = mu[i] - kappa * sigma[i];
+    if (lcb < bestLcb) { bestLcb = lcb; bestIdx = i; }
+  }
+  const [d, bf] = candidates[bestIdx];
+  const e = proxyEvaluate(d, bf, problem);
+  state.X.push([d, bf]);
+  state.y.push(e.objective);
+  state.evals.push(e);
+  return e;
+}
+
+function nearestSection(library, d, bf) {
+  let best = null, bestDist = Infinity;
+  library.forEach(s => {
+    const dist = Math.hypot(s.h - d, s.b - bf);
+    if (dist < bestDist) { bestDist = dist; best = s; }
+  });
+  return best;
+}
+
+/* ============================================================================
    BUILT-UP SECTION PROPERTY CALCULATOR (PRD Section 7.4)
    Doubly-symmetric welded I-section, H x B x tw x tf, with 4 flange-web
    fillet welds of leg size R (2 per flange, top+bottom). Weld fillets are
@@ -456,6 +625,349 @@ function UtilBar({ value }) {
     <div className="util-cell">
       <div className="util-bar-wrap"><div className={"util-bar " + cls} style={{ width: pct + "%" }}></div></div>
       <span>{value.toFixed(2)}</span>
+    </div>
+  );
+}
+
+function ConvergenceChart({ history }) {
+  const [hover, setHover] = useState(null);
+  const w = 560, h = 200, pad = { l: 44, r: 14, t: 10, b: 26 };
+  const plotW = w - pad.l - pad.r, plotH = h - pad.t - pad.b;
+
+  if (history.length === 0) {
+    return <div className="empty-state">Run the optimizer to see the convergence trace.</div>;
+  }
+
+  const objs = history.map(p => p.objective);
+  const yMax = Math.max(...objs), yMin = Math.min(0, Math.min(...objs));
+  const yScale = v => pad.t + plotH - ((v - yMin) / (yMax - yMin || 1)) * plotH;
+  const xScale = i => pad.l + (history.length === 1 ? 0 : (i / (history.length - 1)) * plotW);
+
+  let runningMin = Infinity;
+  const bestSoFar = history.map(p => { runningMin = Math.min(runningMin, p.objective); return runningMin; });
+  const linePath = bestSoFar.map((v, i) => `${i === 0 ? "M" : "L"} ${xScale(i).toFixed(1)} ${yScale(v).toFixed(1)}`).join(" ");
+
+  const gridYs = [0, 0.25, 0.5, 0.75, 1.0].map(f => yMin + f * (yMax - yMin));
+
+  function onMove(evt) {
+    const rect = evt.currentTarget.getBoundingClientRect();
+    const x = evt.clientX - rect.left;
+    const idx = Math.round(((x - pad.l) / plotW) * (history.length - 1));
+    const clamped = Math.max(0, Math.min(history.length - 1, idx));
+    setHover(clamped);
+  }
+
+  return (
+    <div className="chart-card" onMouseLeave={() => setHover(null)}>
+      <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} onMouseMove={onMove}>
+        {gridYs.map((gy, i) => (
+          <line key={i} className="chart-grid" x1={pad.l} x2={w - pad.r} y1={yScale(gy)} y2={yScale(gy)} />
+        ))}
+        <line className="chart-baseline" x1={pad.l} x2={pad.l} y1={pad.t} y2={h - pad.b} />
+        <line className="chart-baseline" x1={pad.l} x2={w - pad.r} y1={h - pad.b} y2={h - pad.b} />
+        {gridYs.map((gy, i) => (
+          <text key={i} className="chart-axis-label" x={pad.l - 6} y={yScale(gy) + 3} textAnchor="end">{gy.toFixed(0)}</text>
+        ))}
+        <text className="chart-axis-label" x={pad.l} y={h - 6}>iter 0</text>
+        <text className="chart-axis-label" x={w - pad.r} y={h - 6} textAnchor="end">iter {history.length - 1}</text>
+
+        {history.map((p, i) => (
+          <circle key={i} cx={xScale(i)} cy={yScale(p.objective)} r="2.5"
+                  fill={p.feasible ? "#3fbf6f" : "#e5534b"} opacity="0.55" />
+        ))}
+        <path d={linePath} fill="none" stroke="#4fb3ff" strokeWidth="2" />
+        {bestSoFar.map((v, i) => (
+          (i === 0 || v < bestSoFar[i - 1]) &&
+          <circle key={"b" + i} cx={xScale(i)} cy={yScale(v)} r="3.5" fill="#4fb3ff" />
+        ))}
+
+        {hover !== null && (
+          <line x1={xScale(hover)} x2={xScale(hover)} y1={pad.t} y2={h - pad.b}
+                stroke="#93a4b3" strokeWidth="1" strokeDasharray="3 3" />
+        )}
+      </svg>
+      {hover !== null && (
+        <div className="chart-tooltip" style={{ left: Math.min(xScale(hover) + 8, w - 170), top: 8 }}>
+          <b>Iteration {hover}</b><br />
+          d={history[hover].design.d.toFixed(0)} mm, bf={history[hover].design.bf.toFixed(0)} mm<br />
+          weight={history[hover].design.weight.toFixed(1)} kg/m, obj={history[hover].objective.toFixed(1)}<br />
+          {history[hover].feasible ? <span style={{ color: "#3fbf6f" }}>feasible</span> : <span style={{ color: "#e5534b" }}>infeasible</span>}
+        </div>
+      )}
+      <div className="chart-legend">
+        <span className="mk"><span className="swatch" style={{ background: "#4fb3ff" }}></span>Best-so-far (objective)</span>
+        <span className="mk"><span className="swatch" style={{ background: "#3fbf6f" }}></span>Feasible sample</span>
+        <span className="mk"><span className="swatch" style={{ background: "#e5534b" }}></span>Infeasible sample (penalized)</span>
+      </div>
+    </div>
+  );
+}
+
+function ScatterChart({ history, dBounds, bfBounds, best }) {
+  const [hover, setHover] = useState(null);
+  const w = 400, h = 320, pad = { l: 46, r: 14, t: 14, b: 30 };
+  const plotW = w - pad.l - pad.r, plotH = h - pad.t - pad.b;
+
+  const xMin = dBounds[0], xMax = dBounds[1], yMin = bfBounds[0], yMax = bfBounds[1];
+  const xScale = v => pad.l + ((v - xMin) / (xMax - xMin)) * plotW;
+  const yScale = v => pad.t + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  if (history.length === 0) {
+    return <div className="empty-state">Run the optimizer to see sampled (d, bf) points.</div>;
+  }
+
+  return (
+    <div className="chart-card" onMouseLeave={() => setHover(null)}>
+      <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+        <rect x={pad.l} y={pad.t} width={plotW} height={plotH} fill="none" stroke="#2c3a48" strokeDasharray="4 3" />
+        <line className="chart-baseline" x1={pad.l} x2={pad.l} y1={pad.t} y2={h - pad.b} />
+        <line className="chart-baseline" x1={pad.l} x2={w - pad.r} y1={h - pad.b} y2={h - pad.b} />
+        <text className="chart-axis-label" x={pad.l} y={h - 8}>d={xMin.toFixed(0)}</text>
+        <text className="chart-axis-label" x={w - pad.r} y={h - 8} textAnchor="end">d={xMax.toFixed(0)}</text>
+        <text className="chart-axis-label" x={pad.l - 6} y={h - pad.b + 3} textAnchor="end">bf={yMin.toFixed(0)}</text>
+        <text className="chart-axis-label" x={pad.l - 6} y={pad.t + 8} textAnchor="end">bf={yMax.toFixed(0)}</text>
+
+        {history.map((p, i) => (
+          p.feasible ? (
+            <circle key={i} cx={xScale(p.design.d)} cy={yScale(p.design.bf)} r={hover === i ? 6 : 4.5}
+                    fill="#3fbf6f" fillOpacity="0.85" stroke="#0f1720" strokeWidth="1"
+                    onMouseEnter={() => setHover(i)} />
+          ) : (
+            <g key={i} transform={`translate(${xScale(p.design.d)},${yScale(p.design.bf)})`}
+               onMouseEnter={() => setHover(i)}>
+              <line x1="-4" y1="-4" x2="4" y2="4" stroke="#e5534b" strokeWidth={hover === i ? 2.5 : 1.6} />
+              <line x1="-4" y1="4" x2="4" y2="-4" stroke="#e5534b" strokeWidth={hover === i ? 2.5 : 1.6} />
+            </g>
+          )
+        ))}
+        {best && (
+          <g transform={`translate(${xScale(best.design.d)},${yScale(best.design.bf)})`}>
+            <circle r="9" fill="none" stroke="#e5a63f" strokeWidth="2" />
+          </g>
+        )}
+      </svg>
+      {hover !== null && (
+        <div className="chart-tooltip" style={{ left: xScale(history[hover].design.d) + 10, top: yScale(history[hover].design.bf) }}>
+          d={history[hover].design.d.toFixed(0)} mm, bf={history[hover].design.bf.toFixed(0)} mm<br />
+          weight={history[hover].design.weight.toFixed(1)} kg/m<br />
+          {history[hover].feasible ? "feasible" : "infeasible"}
+        </div>
+      )}
+      <div className="chart-legend">
+        <span className="mk"><span className="swatch" style={{ background: "#3fbf6f" }}></span>&#9679; Feasible</span>
+        <span className="mk"><span className="swatch" style={{ background: "#e5534b" }}></span>&#10005; Infeasible</span>
+        <span className="mk"><span className="swatch" style={{ background: "#e5a63f" }}></span>&#9711; Best found</span>
+      </div>
+    </div>
+  );
+}
+
+function BayesianTab() {
+  const [holeDia, setHoleDia] = useState(610);
+  const [allowance, setAllowance] = useState(75);
+  const [allowanceBasis, setAllowanceBasis] = useState("per_side");
+  const [fy, setFy] = useState(355);
+  const [mDemand, setMDemand] = useState(170);
+  const [dLo, setDLo] = useState(150), [dHi, setDHi] = useState(600);
+  const [bfLo, setBfLo] = useState(75), [bfHi, setBfHi] = useState(350);
+  const [nInit, setNInit] = useState(8);
+  const [nIter, setNIter] = useState(20);
+  const [kappa, setKappa] = useState(2.0);
+  const [seed, setSeed] = useState(42);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [history, setHistory] = useState([]);
+  const [showTable, setShowTable] = useState(false);
+
+  const dNet = netDiagonal(holeDia, allowance, allowanceBasis);
+
+  const best = useMemo(() => {
+    if (history.length === 0) return null;
+    const feasible = history.filter(e => e.feasible);
+    const pool = feasible.length ? feasible : history;
+    return pool.reduce((a, b) => (b.objective < a.objective ? b : a));
+  }, [history]);
+
+  async function run() {
+    setRunning(true); setProgress(0); setHistory([]);
+    const problem = {
+      dNet, fy, mDemand,
+      dBounds: [dLo, dHi], bfBounds: [bfLo, bfHi],
+      penaltyWeight: 500,
+    };
+    const rng = makeRng(seed);
+    const state = initBO(problem, nInit, rng);
+    setHistory(state.evals.slice());
+    await new Promise(r => setTimeout(r, 0));
+    for (let it = 0; it < nIter; it++) {
+      stepBO(state, problem, 1200, kappa, rng);
+      setHistory(state.evals.slice());
+      setProgress(it + 1);
+      await new Promise(r => setTimeout(r, 40));
+    }
+    setRunning(false);
+  }
+
+  const nearestKS = best ? nearestSection(KS_LIBRARY, best.design.d, best.design.bf) : null;
+  const nearestEN = best ? nearestSection(EN_LIBRARY, best.design.d, best.design.bf) : null;
+
+  const tile = (k, v, u) => (
+    <div className="prop-tile"><div className="k">{k}</div><div className="v">{v}<span className="u">{u}</span></div></div>
+  );
+
+  return (
+    <div className="grid">
+      <div className="panel">
+        <h2>Phase 2 &mdash; Bayesian refinement</h2>
+        <div className="note" style={{ marginTop: 0, marginBottom: 12 }}>
+          Continuous (depth, flange width) search for a custom built-up section &mdash;
+          for cases the Phase 1 catalog search can't reach, or where the standard
+          catalog result looks inefficient (utilization well below 1.0 across the
+          board). <b>Illustrative Phase 2 seed only</b>, not a production selection.
+        </div>
+
+        <div className="field">
+          <label>Drilling hole diameter, D_hole (mm)</label>
+          <input type="number" value={holeDia} onChange={e => setHoleDia(+e.target.value)} disabled={running} />
+        </div>
+        <div className="row">
+          <div className="field">
+            <label>Allowance, C (mm)</label>
+            <input type="number" value={allowance} onChange={e => setAllowance(+e.target.value)} disabled={running} />
+          </div>
+          <div className="field">
+            <label>Basis</label>
+            <div className="toggle-group">
+              <button className={allowanceBasis === "per_side" ? "active" : ""} disabled={running} onClick={() => setAllowanceBasis("per_side")}>D-2C</button>
+              <button className={allowanceBasis === "total" ? "active" : ""} disabled={running} onClick={() => setAllowanceBasis("total")}>D-C</button>
+            </div>
+          </div>
+        </div>
+        <div className="small-muted" style={{ marginBottom: 12 }}>D_net = {dNet.toFixed(0)} mm</div>
+
+        <div className="row">
+          <div className="field">
+            <label>Steel grade, fy (MPa)</label>
+            <input type="number" value={fy} onChange={e => setFy(+e.target.value)} disabled={running} />
+          </div>
+          <div className="field">
+            <label>Moment demand, M (kN&middot;m)</label>
+            <input type="number" value={mDemand} onChange={e => setMDemand(+e.target.value)} disabled={running} />
+          </div>
+        </div>
+
+        <div className="row">
+          <div className="field">
+            <label>Depth search box, d (mm)</label>
+            <div className="row" style={{ gap: 6 }}>
+              <input type="number" value={dLo} onChange={e => setDLo(+e.target.value)} disabled={running} />
+              <input type="number" value={dHi} onChange={e => setDHi(+e.target.value)} disabled={running} />
+            </div>
+          </div>
+        </div>
+        <div className="row">
+          <div className="field">
+            <label>Flange width search box, bf (mm)</label>
+            <div className="row" style={{ gap: 6 }}>
+              <input type="number" value={bfLo} onChange={e => setBfLo(+e.target.value)} disabled={running} />
+              <input type="number" value={bfHi} onChange={e => setBfHi(+e.target.value)} disabled={running} />
+            </div>
+          </div>
+        </div>
+
+        <div className="row">
+          <div className="field">
+            <label>Initial samples</label>
+            <input type="number" value={nInit} onChange={e => setNInit(+e.target.value)} disabled={running} />
+          </div>
+          <div className="field">
+            <label>BO iterations</label>
+            <input type="number" value={nIter} onChange={e => setNIter(+e.target.value)} disabled={running} />
+          </div>
+          <div className="field">
+            <label>Exploration &kappa;</label>
+            <input type="number" step="0.1" value={kappa} onChange={e => setKappa(+e.target.value)} disabled={running} />
+          </div>
+        </div>
+
+        <div className="run-bar">
+          <button className="btn-primary" disabled={running} onClick={run}>
+            {running ? "Running..." : "Run Bayesian refinement"}
+          </button>
+          <button className="btn-secondary" disabled={running} onClick={() => setSeed(Math.floor(Math.random() * 1e9))}>
+            Randomize seed
+          </button>
+        </div>
+        {running && (
+          <div className="run-bar">
+            <div className="progress-track"><div className="progress-fill" style={{ width: `${(progress / nIter) * 100}%` }}></div></div>
+            <span className="small-muted">{progress}/{nIter}</span>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div className="panel" style={{ marginBottom: 16 }}>
+          <h2>Convergence &mdash; best objective vs. iteration</h2>
+          <ConvergenceChart history={history} />
+        </div>
+
+        <div className="panel" style={{ marginBottom: 16 }}>
+          <h2>Design space samples (d vs. bf)</h2>
+          <ScatterChart history={history} dBounds={[dLo, dHi]} bfBounds={[bfLo, bfHi]} best={best} />
+        </div>
+
+        <div className="panel">
+          <h2>Best design found</h2>
+          {!best ? (
+            <div className="empty-state">Run the optimizer to see a result.</div>
+          ) : (
+            <>
+              <div className="prop-grid">
+                {tile("Depth, d", best.design.d.toFixed(0), "mm")}
+                {tile("Flange width, bf", best.design.bf.toFixed(0), "mm")}
+                {tile("tf / tw (derived)", `${best.design.tf.toFixed(1)} / ${best.design.tw.toFixed(1)}`, "mm")}
+                {tile("Weight", best.design.weight.toFixed(1), "kg/m")}
+                {tile("Diagonal / D_net", `${best.design.diagonal.toFixed(0)} / ${dNet.toFixed(0)}`, "mm")}
+                {tile("Mp (capacity)", best.MpKNm.toFixed(1), "kN·m")}
+                {tile("Demand", mDemand.toFixed(1), "kN·m")}
+                {tile("Feasible", best.feasible ? "Yes" : "No", "")}
+              </div>
+              <div className="note">
+                Nearest standard catalog sections (Euclidean distance in h&times;b, not a
+                capacity match &mdash; re-verify against Section 6):
+                <br />&bull; KS: <b>{nearestKS.name}</b> ({nearestKS.mass.toFixed(1)} kg/m)
+                <br />&bull; EN: <b>{nearestEN.name}</b> ({nearestEN.mass.toFixed(1)} kg/m)
+              </div>
+              <button className="btn-secondary" style={{ marginTop: 10 }} onClick={() => setShowTable(s => !s)}>
+                {showTable ? "Hide" : "Show"} evaluation table ({history.length} samples)
+              </button>
+              {showTable && (
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr><th>#</th><th>d (mm)</th><th>bf (mm)</th><th>Weight (kg/m)</th><th>Mp (kN&middot;m)</th><th>Objective</th><th>Feasible</th></tr>
+                    </thead>
+                    <tbody>
+                      {history.map((e, i) => (
+                        <tr key={i} className={best === e ? "optimum" : ""}>
+                          <td>{i}</td>
+                          <td>{e.design.d.toFixed(0)}</td>
+                          <td>{e.design.bf.toFixed(0)}</td>
+                          <td>{e.design.weight.toFixed(1)}</td>
+                          <td>{e.MpKNm.toFixed(1)}</td>
+                          <td>{e.objective.toFixed(1)}</td>
+                          <td>{e.feasible ? <span className="badge fit">YES</span> : <span className="badge nofit">NO</span>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -697,8 +1209,11 @@ function App() {
       <div className="tabs">
         <button className={"tab-btn" + (tab === "optimizer" ? " active" : "")} onClick={() => setTab("optimizer")}>CIP Beam Optimizer</button>
         <button className={"tab-btn" + (tab === "props" ? " active" : "")} onClick={() => setTab("props")}>Built-Up Section Properties</button>
+        <button className={"tab-btn" + (tab === "bayesian" ? " active" : "")} onClick={() => setTab("bayesian")}>Bayesian Refinement (Phase 2)</button>
       </div>
-      {tab === "optimizer" ? <OptimizerTab /> : <SectionPropertyTab />}
+      {tab === "optimizer" && <OptimizerTab />}
+      {tab === "props" && <SectionPropertyTab />}
+      {tab === "bayesian" && <BayesianTab />}
       <div className="footer-note">
         Companion files: optimized_beam_aisc.py &middot; optimized_steel_beam.py &middot;
         bayesian_optimization.py &middot; CIPBeamOptimizer.jsx. Section property tables are
