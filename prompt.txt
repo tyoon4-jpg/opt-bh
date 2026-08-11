@@ -1,0 +1,18 @@
+# For a given dimension of drilling hole diameter and the construction allowances(ie. 50mm, 75mm, 1`00mm),
+calcullate the diagonal length of the beam, 
+
+
+
+# Create a PRD framework for Steel Beam Optimization for CIP App. 
+# Input values: 
+## Drilling hole diameter of CIP
+## construction allowances: verify this values (50mm, 75mm, 100mm)
+## claculate net diagonal length for the beam
+# create a React-based interactive calculator or app.
+##  optimized_steel_beam.m          ← Python: grid search optimizer (Eurocode 3)
+## optimized_beam_aisc.m           ← Python: AISC 360 parallel checks
+## bayesian_optimization.py        ← Python: BO refinement (planned)
+## include a React-based interactive calculation option
+# provide 1) comprehesive process of selecting optimum cross section, 2) selected beam capacity calculation 
+according to the EN and AISC method, 3) Optimization program app.
+# Include all check pass: calculation pipeline complete
