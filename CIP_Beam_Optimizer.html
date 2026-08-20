@@ -243,6 +243,8 @@ const CODE_META = {
           momentUnit: "kN·m", shearUnit: "kN", axialUnit: "kN", massUnit: "kg/m", lenUnit: "mm" },
   KS:   { label: "KS D 3502 / KDS 21 30 00 (mirrored)", grades: {"SM490": 325, "SS400": 235, "SM520": 355}, gradeUnit: "MPa",
           momentUnit: "kN·m", shearUnit: "kN", axialUnit: "kN", massUnit: "kg/m", lenUnit: "mm" },
+  BUILTUP: { label: "Built-Up Welded I-Section (KS-based checks)", grades: {"SM490": 325, "SS400": 235, "SM520": 355}, gradeUnit: "MPa",
+          momentUnit: "kN·m", shearUnit: "kN", axialUnit: "kN", massUnit: "kg/m", lenUnit: "mm" },
 };
 
 function netDiagonal(holeMM, allowMM, basis) {
@@ -392,10 +394,34 @@ function evaluateSection(code, s, inp, dNet) {
 
 function optimize(code, inp) {
   const dNet = netDiagonal(inp.holeDia, inp.allowance, inp.allowanceBasis);
-  const library = code === "AISC" ? AISC_LIBRARY : code === "EN" ? EN_LIBRARY : KS_LIBRARY;
+  const library = code === "AISC" ? AISC_LIBRARY : code === "EN" ? EN_LIBRARY : code === "KS" ? KS_LIBRARY : builtUpLibrary();
   const results = library.map(s => evaluateSection(code, s, inp, dNet));
   const admissible = results.filter(r => r.passes).sort((a, b) => a.weightOrMass - b.weightOrMass);
   return { dNet, results, admissible };
+}
+
+// Computed "catalog" for the BUILTUP design-code option -- grid-searches H
+// per the proportional design rule (bf=0.55H, tf=H/30, tw=H/50, per CLAUDE.md
+// / the Beam Section Properties tab) at a fixed min. weld leg z=6mm, using
+// builtUpProperties() (defined later in this file -- safe, function
+// declarations are hoisted module-wide). Converts its mm-native output into
+// the cm/mm field set evaluateSection()'s non-AISC (KS-style) branch expects:
+// A mm^2->cm^2 (/100), Zx mm^3->cm^3 (/1000), Iy mm^4->cm^4 (/1e4); h,b,tw,tf
+// stay in mm. This lets BUILTUP reuse evaluateSection/optimize/FitDiagram
+// completely unchanged, since neither special-cases "EN"/"KS" by name --
+// they branch only on "is it AISC," so any KS-shaped candidate works.
+function builtUpLibrary() {
+  const z = 6; // mm, default min. weld leg size (matches SectionPropertyTab default)
+  const library = [];
+  for (let H = 250; H <= 600; H += 10) {
+    const B = 0.55 * H;
+    const tf = H / 30;
+    const tw = H / 50;
+    const p = builtUpProperties(H, B, tw, tf, z);
+    const name = `BH-${H}x${+B.toFixed(1)}x${+tw.toFixed(1)}x${+tf.toFixed(1)}`; // matches KS "H-HxBxtwxtf" convention, "BH" = built-up H
+    library.push({ name, mass: p.weight, h: H, b: B, tw, tf, A: p.A / 100, Zx: p.Zx / 1000, Iy: p.Iy / 1e4 });
+  }
+  return library;
 }
 
 /* ============================================================================
@@ -1123,7 +1149,7 @@ function OptimizerTab() {
     LbConstruction, LbService,
   }), [holeDia, allowance, allowanceBasis, grade, Mu, Vu, Pu, LbConstruction, LbService, code]);
 
-  const { dNet, admissible } = useMemo(() => optimize(code, inp), [code, inp]);
+  const { dNet, results, admissible } = useMemo(() => optimize(code, inp), [code, inp]);
   const optimum = admissible.length ? admissible[0].section : null;
 
   return (
@@ -1134,11 +1160,22 @@ function OptimizerTab() {
         <div className="field">
           <label>Design code</label>
           <div className="toggle-group">
-            {["AISC", "EN", "KS"].map(c => (
-              <button key={c} className={code === c ? "active" : ""} onClick={() => onCodeChange(c)}>{c}</button>
+            {[{ k: "AISC", label: "AISC" }, { k: "EN", label: "EN" }, { k: "KS", label: "KS" }, { k: "BUILTUP", label: "Built-Up" }].map(o => (
+              <button key={o.k} className={code === o.k ? "active" : ""} onClick={() => onCodeChange(o.k)}>{o.label}</button>
             ))}
           </div>
         </div>
+
+        {code === "BUILTUP" && (
+          <div className="note">
+            Grid-searches H = 250&ndash;600mm (10mm steps) using the proportional
+            design rule bf&asymp;0.55H, tf&asymp;H/30, tw&asymp;H/50 with a fixed min.
+            weld leg z=6mm, evaluated via KS formulas &mdash; the same
+            weld-inclusive builtUpProperties() model as the Beam Section
+            Properties tab. For a single custom geometry or a different weld
+            leg size, use that tab directly.
+          </div>
+        )}
 
         <div className="field">
           <label>Drilling hole diameter, D_hole (mm)</label>
@@ -1215,13 +1252,14 @@ function OptimizerTab() {
         </div>
 
         <div className="panel">
-          <h2>Ranked admissible sections ({admissible.length} of {code === "AISC" ? AISC_LIBRARY.length : code === "EN" ? EN_LIBRARY.length : KS_LIBRARY.length})</h2>
+          <h2>Ranked admissible sections ({admissible.length} of {results.length})</h2>
           {admissible.length === 0 ? (
             <div className="empty-state">
-              NO ADMISSIBLE SECTION &mdash; no catalog section both fits the hole and
-              passes every applicable strength check. Widen the hole, raise the
-              allowance tier, reduce demand, or check the Bayesian refinement
-              prototype for a custom built-up option.
+              NO ADMISSIBLE SECTION &mdash; no candidate section both fits the hole
+              and passes every applicable strength check. Widen the hole, raise
+              the allowance tier, reduce demand, or try the Built-Up option
+              (grid-searches custom welded geometry) if you're currently on a
+              fixed catalog code.
             </div>
           ) : (
             <table>
@@ -1374,6 +1412,136 @@ function SectionPropertyTab() {
   );
 }
 
+/* ============================================================================
+   COST ESTIMATOR (Korean market)
+   Compares a KS_LIBRARY rolled H-shape against a free-parameter built-up
+   beam on installed steel cost. Steel unit prices (KRW/ton) and fabrication
+   cost (entered as a % ratio of material cost, per project convention --
+   built-up defaults to 12%, mid of a documented 10-15% shop-welding range;
+   rolled defaults to 0%, no figure specified for mill-rolled fabrication)
+   are user-editable starting points, NOT a live market feed -- this tool has
+   no price-lookup capability. Update both before relying on the result.
+   ========================================================================= */
+function CostEstimatorTab() {
+  const [L, setL] = useState(6); // shared beam length, m
+
+  const [ksName, setKsName] = useState("H-420x230x8x13");
+  const [rolledPricePerTon, setRolledPricePerTon] = useState(700000); // KRW/ton
+  const [rolledFabRatio, setRolledFabRatio] = useState(0); // %
+
+  const [H, setH] = useState(420);
+  const [B, setB] = useState(230);
+  const [tw, setTw] = useState(8);
+  const [tf, setTf] = useState(13);
+  const [z, setZ] = useState(6);
+  const [builtUpPricePerTon, setBuiltUpPricePerTon] = useState(600000); // KRW/ton
+  const [builtUpFabRatio, setBuiltUpFabRatio] = useState(12); // %
+
+  const ksSection = KS_LIBRARY.find(s => s.name === ksName) || KS_LIBRARY[0];
+  const buProps = useMemo(() => builtUpProperties(H, B, tw, tf, z), [H, B, tw, tf, z]);
+
+  function costOf(massKgPerM, pricePerTon, fabRatioPct) {
+    const totalWeightKg = massKgPerM * L;
+    const materialCost = totalWeightKg * (pricePerTon / 1000);
+    const fabricationCost = materialCost * (fabRatioPct / 100);
+    const totalCost = materialCost + fabricationCost;
+    return { totalWeightKg, materialCost, fabricationCost, totalCost, costPerM: totalCost / L };
+  }
+
+  const ksCost = costOf(ksSection.mass, rolledPricePerTon, rolledFabRatio);
+  const buCost = costOf(buProps.weight, builtUpPricePerTon, builtUpFabRatio);
+  const weightSavingsPct = ksSection.mass > 0 ? ((ksSection.mass - buProps.weight) / ksSection.mass) * 100 : 0;
+  const costSavingsPct = ksCost.totalCost > 0 ? ((ksCost.totalCost - buCost.totalCost) / ksCost.totalCost) * 100 : 0;
+
+  const won = v => Math.round(v).toLocaleString("ko-KR");
+  const tile = (k, v, u) => (
+    <div className="prop-tile"><div className="k">{k}</div><div className="v">{v}<span className="u">{u}</span></div></div>
+  );
+
+  return (
+    <div>
+      <div className="panel" style={{ marginBottom: 16 }}>
+        <h2>Shared inputs</h2>
+        <div className="field">
+          <label>Beam length, L (m)</label>
+          <input type="number" value={L} onChange={e => setL(+e.target.value)} />
+        </div>
+        <div className="note">
+          Korean-market installed-cost comparison, KS rolled H-shape vs.
+          built-up welded I-section. Steel unit prices and fabrication ratios
+          below are user-editable starting points, not live market data --
+          update them with current quotes before relying on the result. Per
+          project scope, this tab is a working scaffold to be finalized once
+          the final KS-vs-built-up beam selection is made.
+        </div>
+      </div>
+
+      <div className="grid">
+        <div className="panel">
+          <h2>KS rolled beam</h2>
+          <div className="field">
+            <label>Section</label>
+            <select value={ksName} onChange={e => setKsName(e.target.value)}>
+              {KS_LIBRARY.map(s => <option key={s.name} value={s.name}>{s.name} ({s.mass} kg/m)</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <label>Steel unit price (₩/ton)</label>
+            <input type="number" value={rolledPricePerTon} onChange={e => setRolledPricePerTon(+e.target.value)} />
+          </div>
+          <div className="field">
+            <label>Fabrication cost, ratio of material (%)</label>
+            <input type="number" value={rolledFabRatio} onChange={e => setRolledFabRatio(+e.target.value)} />
+          </div>
+          <div className="prop-grid">
+            {tile("Weight", ksSection.mass.toFixed(1), "kg/m")}
+            {tile("Total weight", ksCost.totalWeightKg.toFixed(0), "kg")}
+            {tile("Material cost", won(ksCost.materialCost), "₩")}
+            {tile("Fabrication cost", won(ksCost.fabricationCost), "₩")}
+            {tile("Total cost", won(ksCost.totalCost), "₩")}
+            {tile("Cost / m", won(ksCost.costPerM), "₩/m")}
+          </div>
+        </div>
+
+        <div className="panel">
+          <h2>Built-up beam</h2>
+          <div className="field"><label>Depth, H (mm)</label><input type="number" value={H} onChange={e => setH(+e.target.value)} /></div>
+          <div className="field"><label>Flange width, B (mm)</label><input type="number" value={B} onChange={e => setB(+e.target.value)} /></div>
+          <div className="row">
+            <div className="field"><label>Web thickness, tw (mm)</label><input type="number" value={tw} onChange={e => setTw(+e.target.value)} /></div>
+            <div className="field"><label>Flange thickness, tf (mm)</label><input type="number" value={tf} onChange={e => setTf(+e.target.value)} /></div>
+          </div>
+          <div className="field"><label>Min. weld leg size, z (mm)</label><input type="number" value={z} onChange={e => setZ(+e.target.value)} /></div>
+          <div className="field">
+            <label>Steel unit price (₩/ton)</label>
+            <input type="number" value={builtUpPricePerTon} onChange={e => setBuiltUpPricePerTon(+e.target.value)} />
+          </div>
+          <div className="field">
+            <label>Fabrication cost, ratio of material (%) &mdash; shop welding</label>
+            <input type="number" value={builtUpFabRatio} onChange={e => setBuiltUpFabRatio(+e.target.value)} />
+          </div>
+          <div className="prop-grid">
+            {tile("Weight", buProps.weight.toFixed(1), "kg/m")}
+            {tile("Total weight", buCost.totalWeightKg.toFixed(0), "kg")}
+            {tile("Material cost", won(buCost.materialCost), "₩")}
+            {tile("Fabrication cost", won(buCost.fabricationCost), "₩")}
+            {tile("Total cost", won(buCost.totalCost), "₩")}
+            {tile("Cost / m", won(buCost.costPerM), "₩/m")}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: 16 }}>
+        <h2>Comparison</h2>
+        <div className="prop-grid">
+          {tile("Weight savings (built-up vs. KS)", weightSavingsPct.toFixed(1), "%")}
+          {tile("Cost savings (built-up vs. KS)", costSavingsPct.toFixed(1), "%")}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [tab, setTab] = useState("optimizer");
   return (
@@ -1387,10 +1555,12 @@ function App() {
       <div className="tabs">
         <button className={"tab-btn" + (tab === "optimizer" ? " active" : "")} onClick={() => setTab("optimizer")}>CIP Beam Optimizer</button>
         <button className={"tab-btn" + (tab === "props" ? " active" : "")} onClick={() => setTab("props")}>Beam Section Properties</button>
+        <button className={"tab-btn" + (tab === "cost" ? " active" : "")} onClick={() => setTab("cost")}>Cost Estimator (KR)</button>
         <button className={"tab-btn" + (tab === "bayesian" ? " active" : "")} onClick={() => setTab("bayesian")}>Bayesian Refinement (Phase 2)</button>
       </div>
       {tab === "optimizer" && <OptimizerTab />}
       {tab === "props" && <SectionPropertyTab />}
+      {tab === "cost" && <CostEstimatorTab />}
       {tab === "bayesian" && <BayesianTab />}
       <div className="footer-note">
         Companion files: optimized_beam_aisc.py &middot; optimized_steel_beam.py &middot;
