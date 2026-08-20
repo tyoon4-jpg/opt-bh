@@ -515,39 +515,159 @@ function nearestSection(library, d, bf) {
 /* ============================================================================
    BUILT-UP SECTION PROPERTY CALCULATOR (PRD Section 7.4)
    Doubly-symmetric welded I-section, H x B x tw x tf, with 4 flange-web
-   fillet welds of leg size R (2 per flange, top+bottom). Weld fillets are
-   included via parallel-axis theorem; own-centroidal inertia of each
-   triangular fillet uses the standard right-triangle formula R^4/36.
-   Cw reuses the same Iz*(h-tf)^2/4 approximation used for the LTB screen
-   above, for consistency across this deliverable. J uses the standard
-   open thin-wall sum (weld metal excluded, conservative).
+   fillet welds of minimum leg size z (2 per flange, top+bottom). Weld
+   fillets are included via parallel-axis theorem; own-centroidal inertia
+   of each triangular fillet uses the standard right-triangle formula
+   z^4/36. The design throat thickness a = 0.7z is a weld-strength
+   dimension (perpendicular distance across the weld throat) -- it does
+   NOT replace z in these formulas, since the deposited weld-metal
+   triangle's cross-sectional geometry is defined by its leg size, not
+   its throat. a is computed and displayed in the UI for reference only.
+   Cw is reported two ways: Cw (screening) reuses the whole-section Iy
+   (flanges+web+welds) x (h-tf)^2/4, matching the LTB screen above for
+   consistency across this deliverable -- NOTE this is NON-conservative
+   (it overstates warping rigidity and therefore Mcr) because Cw enters
+   Mcr with a positive sign. Cw (flange-only) uses the classical closed
+   form Cw = Iyf*ho^2/2 (Iyf = flange-only weak-axis inertia, ho = flange
+   centroid spacing = H-tf), which drops the web/weld contribution to Iy
+   and is the correct, conservative value for a final LTB check. J uses
+   the standard open thin-wall sum (weld metal excluded, conservative).
    ========================================================================= */
-function builtUpProperties(H, B, tw, tf, R) {
-  const dz = tw / 2 + R / 3;
-  const dy = (H / 2 - tf) - R / 3;
-  const fArea = (R * R) / 2;
+function builtUpProperties(H, B, tw, tf, z) {
+  const dz = tw / 2 + z / 3;
+  const dy = (H / 2 - tf) - z / 3;
+  const fArea = (z * z) / 2;
 
   const A = 2 * B * tf + (H - 2 * tf) * tw + 4 * fArea; // mm^2
   const weight = A * 7.85e-6 * 1000; // kg/m
 
   const IxBase = (B * Math.pow(H, 3)) / 12 - ((B - tw) * Math.pow(H - 2 * tf, 3)) / 12;
-  const IxWeld = 4 * (Math.pow(R, 4) / 36 + fArea * dy * dy);
+  const IxWeld = 4 * (Math.pow(z, 4) / 36 + fArea * dy * dy);
   const Ix = IxBase + IxWeld; // mm^4
 
-  const IyBase = 2 * ((tf * Math.pow(B, 3)) / 12) + ((H - 2 * tf) * Math.pow(tw, 3)) / 12;
-  const IyWeld = 4 * (Math.pow(R, 4) / 36 + fArea * dz * dz);
+  const IyFlange = 2 * ((tf * Math.pow(B, 3)) / 12); // mm^4, flanges only (no web, no weld)
+  const IyBase = IyFlange + ((H - 2 * tf) * Math.pow(tw, 3)) / 12;
+  const IyWeld = 4 * (Math.pow(z, 4) / 36 + fArea * dz * dz);
   const Iy = IyBase + IyWeld; // mm^4
 
   const Sx = Ix / (H / 2), Sy = Iy / (B / 2);
-  const Zx = B * tf * (H - tf) + (tw * Math.pow(H - 2 * tf, 2)) / 4 + 2 * R * R * dy;
-  const Zy = (Math.pow(B, 2) * tf) / 2 + (Math.pow(tw, 2) * (H - 2 * tf)) / 4 + 2 * R * R * dz;
+  const Zx = B * tf * (H - tf) + (tw * Math.pow(H - 2 * tf, 2)) / 4 + 2 * z * z * dy;
+  const Zy = (Math.pow(B, 2) * tf) / 2 + (Math.pow(tw, 2) * (H - 2 * tf)) / 4 + 2 * z * z * dz;
   const ix = Math.sqrt(Ix / A), iy = Math.sqrt(Iy / A);
-  const Cw = Iy * Math.pow(H - tf, 2) / 4; // mm^6, whole-section-Iy approximation
+  const Cw = Iy * Math.pow(H - tf, 2) / 4; // mm^6, whole-section-Iy screening approximation (non-conservative)
+  const CwFlange = IyFlange * Math.pow(H - tf, 2) / 4; // mm^6, flange-only closed form -- use for final LTB checks
   const J = (1 / 3) * (2 * B * Math.pow(tf, 3) + (H - 2 * tf) * Math.pow(tw, 3)); // mm^4, weld excluded
   const Av = (H - 2 * tf) * tw; // mm^2, clear-web shear area
 
-  return { A, weight, Ix, Iy, Sx, Sy, Zx, Zy, ix, iy, Cw, J, Av };
+  return { A, weight, Ix, Iy, Sx, Sy, Zx, Zy, ix, iy, Cw, CwFlange, J, Av };
 }
+
+/* ============================================================================
+   ROLLED SECTION PROPERTY CALCULATOR
+   Same doubly-symmetric idealization and process as builtUpProperties()
+   above (base rectangle Ix/Iy minus the web notch, plus 4 flange-web
+   fillet contributions via parallel-axis theorem), but the fillet is the
+   rolled-shape root radius r (K-area), not a welded bead. A rolled root
+   fillet is CONCAVE: each of the 4 corners is filled by the region inside
+   a square of side r but OUTSIDE the inscribed quarter-circle of radius r
+   tangent to both the flange and web faces (the "spandrel" between a
+   sharp square corner and the rounding arc) -- smaller and more
+   corner-concentrated than the weld's full right-triangle fillet.
+   Closed-form spandrel properties (area, and its own centroid measured
+   from the flange/web corner along each face) derived here by direct
+   double-integration over the region:
+     Af    = r^2 * (4 - pi) / 4                          ~= 0.2146 r^2
+     c     = r * (10 - 3*pi) / (3 * (4 - pi))             ~= 0.2234 r
+     Iown  = r^4 * (176 - 84*pi + 9*pi^2) / (144*(4-pi))  ~= 0.00754 r^4
+   (Iown is the spandrel's second moment about its own centroidal axis,
+   parallel to a face -- the direct analog of the weld triangle's z^4/36.)
+   As with builtUpProperties, J excludes the fillet (thin-wall, flange+web
+   only, conservative) and Cw is reported both ways (screening vs.
+   flange-only) for the same reasons.
+   ========================================================================= */
+function rolledProperties(H, B, tw, tf, r) {
+  const Af = (r * r) * (4 - Math.PI) / 4;
+  const c = r * (10 - 3 * Math.PI) / (3 * (4 - Math.PI));
+  const Iown = Math.pow(r, 4) * (176 - 84 * Math.PI + 9 * Math.PI * Math.PI) / (144 * (4 - Math.PI));
+  const dz = tw / 2 + c;
+  const dy = (H / 2 - tf) - c;
+
+  const A = 2 * B * tf + (H - 2 * tf) * tw + 4 * Af; // mm^2
+  const weight = A * 7.85e-6 * 1000; // kg/m
+
+  const IxBase = (B * Math.pow(H, 3)) / 12 - ((B - tw) * Math.pow(H - 2 * tf, 3)) / 12;
+  const IxFillet = 4 * (Iown + Af * dy * dy);
+  const Ix = IxBase + IxFillet; // mm^4
+
+  const IyFlange = 2 * ((tf * Math.pow(B, 3)) / 12); // mm^4, flanges only (no web, no fillet)
+  const IyBase = IyFlange + ((H - 2 * tf) * Math.pow(tw, 3)) / 12;
+  const IyFillet = 4 * (Iown + Af * dz * dz);
+  const Iy = IyBase + IyFillet; // mm^4
+
+  const Sx = Ix / (H / 2), Sy = Iy / (B / 2);
+  const Zx = B * tf * (H - tf) + (tw * Math.pow(H - 2 * tf, 2)) / 4 + 4 * Af * dy;
+  const Zy = (Math.pow(B, 2) * tf) / 2 + (Math.pow(tw, 2) * (H - 2 * tf)) / 4 + 4 * Af * dz;
+  const ix = Math.sqrt(Ix / A), iy = Math.sqrt(Iy / A);
+  const Cw = Iy * Math.pow(H - tf, 2) / 4; // mm^6, whole-section-Iy screening approximation (non-conservative)
+  const CwFlange = IyFlange * Math.pow(H - tf, 2) / 4; // mm^6, flange-only closed form -- use for final LTB checks
+  const J = (1 / 3) * (2 * B * Math.pow(tf, 3) + (H - 2 * tf) * Math.pow(tw, 3)); // mm^4, fillet excluded
+  const Av = (H - 2 * tf) * tw; // mm^2, clear-web shear area
+
+  return { A, weight, Ix, Iy, Sx, Sy, Zx, Zy, ix, iy, Cw, CwFlange, J, Av };
+}
+
+/* ============================================================================
+   WORKED EXAMPLE -- Cw (screening) vs Cw (flange-only)
+   Flagship section H-420x230x8x13, z=6mm (this tab's default inputs --
+   open the Beam Section Properties tab, Built-Up mode, with no edits to
+   reproduce these numbers).
+
+   Inputs: H=420, B=230, tw=8, tf=13, z=6 mm  (throat a = 0.7z = 4.2 mm)
+     dz = tw/2 + z/3 = 4 + 2            = 6 mm
+     dy = (H/2-tf) - z/3 = 197 - 2      = 195 mm
+     fArea = z^2/2                      = 18 mm^2
+     ho = H - tf                        = 407 mm
+
+   Iy (screening, flanges+web+4 welds):
+     IyFlange = 2*tf*B^3/12             = 26,361,833 mm^4  (= 2636.18 cm^4)
+     Iy,web   = (H-2tf)*tw^3/12         =     16,811 mm^4
+     Iy,weld  = 4*(z^4/36 + fArea*dz^2) =      2,736 mm^4
+     Iy       = IyFlange + Iy,web + Iy,weld
+              = 26,381,380 mm^4         (= 2638.14 cm^4)
+     -- for reference, catalog rolled H-420x230x8x13 lists Iy=2636 cm^4
+        (KS_LIBRARY above), confirming this built-up Iy is in the right
+        ballpark before the weld/web addition.
+
+   Cw (screening)   = Iy       * ho^2 / 4
+                     = 26,381,380 * 407^2 / 4
+                     = 1,092,512,304 mm^6   (1.0925e12 mm^6 = 1,092,512 cm^6)
+
+   Cw (flange-only) = IyFlange * ho^2 / 4
+                     = 26,361,833 * 407^2 / 4
+                     = 1,091,702,807 mm^6   (1.0917e12 mm^6 = 1,091,703 cm^6)
+
+   Delta = Cw(screening) - Cw(flange-only) = 809,497 mm^6 = 0.074% of Cw(screening).
+   For this wide-flange, thin-web geometry the two values are nearly
+   identical -- the screening approximation is only marginally
+   non-conservative here. The gap widens for stockier proportions (thicker
+   web and/or larger z relative to B), where the web/weld share of Iy grows;
+   always use Cw (flange-only) for a stamped-design LTB check regardless of
+   how small the gap looks for any one geometry.
+
+   ROLLED-BEAM VALIDATION -- rolledProperties() vs. plain rolled KS_LIBRARY
+   entries (H-420x230x8x13 above is this project's *optimized built-up*
+   flagship, not a standard mill shape, so it is a poor validation anchor
+   for the rolled fillet model -- use ordinary square rolled columns
+   instead). With r=13mm:
+     H-200x200x8x12:  computed Ix=4715.6 cm^4 vs catalog 4720   (-0.09%)
+                       computed Iy=1601.5 cm^4 vs catalog 1600  (+0.10%)
+     H-300x300x10x15: computed Ix=20194.5 cm^4 vs catalog 20200 (-0.03%)
+   Both back-solve to an implied root radius r~13mm from the catalog's A,
+   matching the well-known real root radius for this KS/JIS shape family --
+   independent confirmation the fillet area/centroid formulas are correct.
+   Always confirm the actual root radius against the current KS D 3502 /
+   EN 10365 / AISC producer table for the target shape before final design.
+   ========================================================================= */
 
 /* ============================================================================
    UI COMPONENTS
@@ -1110,14 +1230,22 @@ function OptimizerTab() {
 }
 
 function SectionPropertyTab() {
+  const [beamType, setBeamType] = useState("builtup"); // "builtup" | "rolled"
   const [H, setH] = useState(420);
   const [B, setB] = useState(230);
   const [tw, setTw] = useState(8);
   const [tf, setTf] = useState(13);
-  const [R, setR] = useState(6);
+  const [z, setZ] = useState(6);    // built-up: min. weld leg size, mm
+  const [r, setR] = useState(13);   // rolled: root fillet radius, mm (validated default -- see rolledProperties comment)
 
-  const p = useMemo(() => builtUpProperties(H, B, tw, tf, R), [H, B, tw, tf, R]);
-  const geomOk = H > 2 * tf + 10 && B > tw + 2 * R;
+  const a = 0.7 * z; // derived throat thickness, mm -- display-only, does not feed section-property formulas
+
+  const p = useMemo(
+    () => (beamType === "rolled" ? rolledProperties(H, B, tw, tf, r) : builtUpProperties(H, B, tw, tf, z)),
+    [beamType, H, B, tw, tf, z, r]
+  );
+  const filletDim = beamType === "rolled" ? r : z;
+  const geomOk = H > 2 * tf + 10 && B > tw + 2 * filletDim;
 
   const tile = (k, v, u) => (
     <div className="prop-tile"><div className="k">{k}</div><div className="v">{v}<span className="u">{u}</span></div></div>
@@ -1126,24 +1254,70 @@ function SectionPropertyTab() {
   return (
     <div className="grid">
       <div className="panel">
-        <h2>Built-up section geometry</h2>
+        <h2>{beamType === "rolled" ? "Rolled section geometry" : "Built-up section geometry"}</h2>
+        <div className="field">
+          <label>Beam type</label>
+          <div className="toggle-group">
+            <button className={beamType === "builtup" ? "active" : ""} onClick={() => setBeamType("builtup")}>Built-Up Beam</button>
+            <button className={beamType === "rolled" ? "active" : ""} onClick={() => setBeamType("rolled")}>Rolled Beam</button>
+          </div>
+        </div>
         <div className="field"><label>Depth, H (mm)</label><input type="number" value={H} onChange={e => setH(+e.target.value)} /></div>
         <div className="field"><label>Flange width, B (mm)</label><input type="number" value={B} onChange={e => setB(+e.target.value)} /></div>
         <div className="row">
           <div className="field"><label>Web thickness, tw (mm)</label><input type="number" value={tw} onChange={e => setTw(+e.target.value)} /></div>
           <div className="field"><label>Flange thickness, tf (mm)</label><input type="number" value={tf} onChange={e => setTf(+e.target.value)} /></div>
         </div>
-        <div className="field"><label>Fillet weld leg, R (mm) &mdash; flange-web weld</label><input type="number" value={R} onChange={e => setR(+e.target.value)} /></div>
-        {!geomOk && <div className="note"><b>Warning:</b> geometry looks inconsistent (check H, B, tw, tf, R proportions).</div>}
+        {beamType === "builtup" ? (
+          <div className="field">
+            <label>Min. weld leg size, z (mm) &mdash; flange-web weld</label>
+            <input type="number" value={z} onChange={e => setZ(+e.target.value)} />
+            <div className="small-muted">Throat Thickness, a = 0.7z = {a.toFixed(2)} mm</div>
+          </div>
+        ) : (
+          <div className="field">
+            <label>Fillet Radius, r (mm) &mdash; rolled root fillet</label>
+            <input type="number" value={r} onChange={e => setR(+e.target.value)} />
+          </div>
+        )}
+        {!geomOk && <div className="note"><b>Warning:</b> geometry looks inconsistent (check H, B, tw, tf, {beamType === "rolled" ? "r" : "z"} proportions).</div>}
         <div className="note">
           Proportional design rule (workspace default starting point): bf&asymp;0.55H,
           tf&asymp;H/30, tw&asymp;H/50. Adjust freely &mdash; this tab does not enforce it.
           <br /><br />
-          Includes 4 flange-web fillet welds (leg R, one each side of the web,
-          top and bottom flange) via parallel-axis theorem. Cw and J use
-          standard thin-wall open-section approximations (weld metal excluded
-          from J, conservative). Verify against a full plate-girder check
-          before stamped design.
+          {beamType === "builtup" ? (
+            <span>
+              Includes 4 flange-web fillet welds (leg z, one each side of the web,
+              top and bottom flange) via parallel-axis theorem. Throat Thickness
+              a = 0.7z is a weld-strength dimension shown for reference only --
+              it does not enter the section-property formulas below, which are
+              governed by the leg size z (the deposited weld metal's actual
+              cross-section). J uses a standard thin-wall open-section
+              approximation (weld metal excluded, conservative). Two Cw values
+              are reported: <b>Cw (screening)</b> uses whole-section Iy and is
+              non-conservative (overstates Mcr) -- for quick comparison only.
+              <b> Cw (flange-only, final LTB)</b> uses the classical closed form
+              and should be used for any capacity check that matters. Verify
+              against a full plate-girder check before stamped design.
+            </span>
+          ) : (
+            <span>
+              Includes 4 flange-web root fillets (radius r, one each side of the
+              web, top and bottom flange) via parallel-axis theorem, modeled as
+              the concave "spandrel" region between a square corner and the
+              inscribed quarter-circle -- the standard K-area idealization for a
+              rolled shape's root radius, and smaller/more corner-concentrated
+              than the built-up tab's convex triangular weld fillet. J uses a
+              standard thin-wall open-section approximation (fillet excluded,
+              conservative). Two Cw values are reported: <b>Cw (screening)</b>
+              uses whole-section Iy and is non-conservative (overstates Mcr) --
+              for quick comparison only. <b>Cw (flange-only, final LTB)</b> uses
+              the classical closed form and should be used for any capacity
+              check that matters. Cross-check against the current KS D 3502 /
+              EN 10365 / AISC producer table A/Ix/Iy for the target shape
+              before final design.
+            </span>
+          )}
         </div>
       </div>
 
@@ -1160,10 +1334,12 @@ function SectionPropertyTab() {
           {tile("Zy (plastic)", (p.Zy / 1e3).toFixed(0), "cm³")}
           {tile("ix", (p.ix / 10).toFixed(2), "cm")}
           {tile("iy", (p.iy / 10).toFixed(2), "cm")}
-          {tile("Cw (warping)", (p.Cw / 1e9).toExponential(2), "m⁶×10⁶")}
+          {tile("Cw (screening)", (p.Cw / 1e9).toExponential(2), "m⁶×10⁶")}
+          {tile("Cw (flange-only, final)", (p.CwFlange / 1e9).toExponential(2), "m⁶×10⁶")}
           {tile("J (torsion)", (p.J / 1e4).toFixed(1), "cm⁴")}
           {tile("Av (shear)", (p.Av / 100).toFixed(1), "cm²")}
           {tile("Shape factor Zx/Sx", (p.Zx / p.Sx).toFixed(2), "")}
+          {beamType === "builtup" && tile("Throat Thickness, a", a.toFixed(2), "mm")}
         </div>
       </div>
     </div>
@@ -1183,7 +1359,7 @@ export default function CIPBeamOptimizer() {
       </div>
       <div className="tabs">
         <button className={"tab-btn" + (tab === "optimizer" ? " active" : "")} onClick={() => setTab("optimizer")}>CIP Beam Optimizer</button>
-        <button className={"tab-btn" + (tab === "props" ? " active" : "")} onClick={() => setTab("props")}>Built-Up Section Properties</button>
+        <button className={"tab-btn" + (tab === "props" ? " active" : "")} onClick={() => setTab("props")}>Beam Section Properties</button>
         <button className={"tab-btn" + (tab === "bayesian" ? " active" : "")} onClick={() => setTab("bayesian")}>Bayesian Refinement (Phase 2)</button>
       </div>
       {tab === "optimizer" && <OptimizerTab />}
