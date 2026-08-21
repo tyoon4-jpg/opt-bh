@@ -135,6 +135,25 @@ const APP_CSS = `
   .progress-fill { height: 100%; background: var(--accent); transition: width 0.15s linear; }
   .table-scroll { max-height: 260px; overflow-y: auto; margin-top: 10px; border-radius: 8px; }
   .small-muted { color: var(--text-dim); font-size: 11.5px; }
+
+  .head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .head-row h2 { margin-bottom: 0; }
+  .legend-key { display: inline-flex; align-items: center; gap: 5px; }
+  .delta-good { color: var(--good); font-weight: 600; }
+  .delta-bad { color: var(--bad); font-weight: 600; }
+  .stat-row { display: flex; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  .stat-row .prop-tile { flex: 1; min-width: 160px; }
+  .compare-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .compare-layout { grid-template-columns: 1fr; } }
+  .pair-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 4px; }
+  @media (max-width: 700px) { .pair-grid { grid-template-columns: 1fr; } }
+  .pair-tile { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; }
+  .pair-tile .k { font-size: 11px; color: var(--text-dim); margin-bottom: 6px; }
+  .pair-row { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 11px; }
+  .pair-name { width: 40px; flex-shrink: 0; color: var(--text-dim); }
+  .pair-bar-wrap { flex: 1; background: var(--panel); border-radius: 3px; height: 10px; overflow: hidden; }
+  .pair-bar { height: 100%; border-radius: 3px; }
+  .pair-val { width: 62px; flex-shrink: 0; text-align: right; font-variant-numeric: tabular-nums; }
 `;
 
 /* ============================================================================
@@ -1289,6 +1308,45 @@ function SectionPropertyTab() {
     <div className="prop-tile"><div className="k">{k}</div><div className="v">{v}<span className="u">{u}</span></div></div>
   );
 
+  function handleExport() {
+    const geomRows = [
+      { Parameter: "Beam type", Value: beamType === "rolled" ? "Rolled" : "Built-Up" },
+      { Parameter: "Depth, H (mm)", Value: H },
+      { Parameter: "Flange width, B (mm)", Value: B },
+      { Parameter: "Web thickness, tw (mm)", Value: tw },
+      { Parameter: "Flange thickness, tf (mm)", Value: tf },
+      beamType === "rolled"
+        ? { Parameter: "Fillet radius, r (mm)", Value: r }
+        : { Parameter: "Weld leg size, z (mm)", Value: z, "Throat thickness, a (mm)": Number(a.toFixed(2)) },
+    ];
+    const propertyRows = [
+      { Property: "Weight", Value: Number(p.weight.toFixed(2)), Unit: "kg/m" },
+      { Property: "Area, A", Value: Number((p.A / 100).toFixed(3)), Unit: "cm²" },
+      { Property: "Ix (strong)", Value: Number((p.Ix / 1e4).toFixed(1)), Unit: "cm⁴" },
+      { Property: "Iy (weak)", Value: Number((p.Iy / 1e4).toFixed(1)), Unit: "cm⁴" },
+      { Property: "Sx", Value: Number((p.Sx / 1e3).toFixed(1)), Unit: "cm³" },
+      { Property: "Sy", Value: Number((p.Sy / 1e3).toFixed(1)), Unit: "cm³" },
+      { Property: "Zx (plastic)", Value: Number((p.Zx / 1e3).toFixed(1)), Unit: "cm³" },
+      { Property: "Zy (plastic)", Value: Number((p.Zy / 1e3).toFixed(1)), Unit: "cm³" },
+      { Property: "ix", Value: Number((p.ix / 10).toFixed(3)), Unit: "cm" },
+      { Property: "iy", Value: Number((p.iy / 10).toFixed(3)), Unit: "cm" },
+      { Property: "Cw (screening)", Value: Number((p.Cw / 1e9).toFixed(4)), Unit: "m⁶×10⁶" },
+      { Property: "Cw (flange-only, final)", Value: Number((p.CwFlange / 1e9).toFixed(4)), Unit: "m⁶×10⁶" },
+      { Property: "J (torsion)", Value: Number((p.J / 1e4).toFixed(2)), Unit: "cm⁴" },
+      { Property: "Av (shear)", Value: Number((p.Av / 100).toFixed(2)), Unit: "cm²" },
+      { Property: "Shape factor Zx/Sx", Value: Number((p.Zx / p.Sx).toFixed(3)), Unit: "" },
+    ];
+    if (beamType === "builtup") propertyRows.push({ Property: "Throat thickness, a", Value: Number(a.toFixed(2)), Unit: "mm" });
+
+    exportWorkbook(
+      `CIP_Section_Properties_${beamType}_${H}x${B}x${tw}x${tf}.xlsx`,
+      [
+        { name: "Geometry Inputs", rows: geomRows },
+        { name: "Section Properties", rows: propertyRows },
+      ]
+    );
+  }
+
   return (
     <div className="grid">
       <div className="panel">
@@ -1360,7 +1418,10 @@ function SectionPropertyTab() {
       </div>
 
       <div className="panel">
-        <h2>Section properties</h2>
+        <div className="head-row">
+          <h2>Section properties</h2>
+          <button className="btn-secondary" onClick={handleExport}>Export to Excel</button>
+        </div>
         <div className="prop-grid">
           {tile("Weight", p.weight.toFixed(1), "kg/m")}
           {tile("Area, A", (p.A / 100).toFixed(2), "cm²")}
@@ -1379,6 +1440,188 @@ function SectionPropertyTab() {
           {tile("Shape factor Zx/Sx", (p.Zx / p.Sx).toFixed(2), "")}
           {beamType === "builtup" && tile("Throat Thickness, a", a.toFixed(2), "mm")}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   TWO-SERIES COMPARISON COMPONENTS (KS Rolled vs. Built-Up)
+   Shared by the Cost Estimator tab's cost comparison and section-property
+   comparison blocks below. Series colors are the dataviz-skill validated
+   dark categorical slots 1 (blue) and 2 (orange) -- checked against this
+   app's --panel surface (#17212c): CVD-safe adjacent pair, both clear the
+   dark lightness band and 3:1 contrast floor.
+   ========================================================================= */
+const SERIES_KS = { name: "KS Rolled", color: "#3987e5" };
+const SERIES_BU = { name: "Built-Up", color: "#d95926" };
+
+// Builds and downloads a .xlsx workbook client-side (SheetJS). sheets:
+// [{ name, rows }] where rows is an array of plain objects (json_to_sheet
+// reads their keys as the header row). Sheet names are truncated to 31
+// chars -- the hard Excel limit. xlsx (~330KB) is dynamically imported here
+// rather than at module load, so the ~150 people who never click "Export"
+// don't pay for it on first paint.
+async function exportWorkbook(filename, sheets) {
+  const XLSX = await import("xlsx");
+  const wb = XLSX.utils.book_new();
+  sheets.forEach(({ name, rows }) => {
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, name.slice(0, 31));
+  });
+  XLSX.writeFile(wb, filename);
+}
+
+// Converts a CompareTable rows array (same shape the table/chart consume)
+// into flat {Metric, <seriesA>, <seriesB>, "Delta (%)"} objects for export
+// -- numeric values kept as numbers (not the display-formatted strings) so
+// the workbook stays usable for further calculation in Excel.
+function compareRowsToSheet(rows, seriesA = SERIES_KS, seriesB = SERIES_BU) {
+  return rows.map(r => {
+    const deltaPct = r.a !== 0 ? ((r.b - r.a) / Math.abs(r.a)) * 100 : 0;
+    return {
+      Metric: r.unit ? `${r.label} (${r.unit})` : r.label,
+      [seriesA.name]: Math.round(r.a * 1e4) / 1e4,
+      [seriesB.name]: Math.round(r.b * 1e4) / 1e4,
+      "Delta (%)": Math.round(deltaPct * 100) / 100,
+    };
+  });
+}
+
+// path for a bar with 4px-rounded top corners, square at the baseline
+// (mark spec: "4px rounded data-end, square at the baseline")
+function barPath(x, y, width, height, r = 4) {
+  if (height <= 0) return "";
+  const rr = Math.min(r, width / 2, height);
+  return `M${x},${y + height} L${x},${y + rr} Q${x},${y} ${x + rr},${y} `
+       + `L${x + width - rr},${y} Q${x + width},${y} ${x + width},${y + rr} `
+       + `L${x + width},${y + height} Z`;
+}
+
+// round a max value up to a clean axis tick (1/2/5 x 10^n)
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const exp = Math.floor(Math.log10(v));
+  const base = Math.pow(10, exp);
+  const norm = v / base;
+  const niceNorm = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return niceNorm * base;
+}
+
+// Grouped column chart, two series, N categories. One linear y-axis --
+// callers must pass values already on a common scale (e.g. all KRW, or
+// all kg/m); never mix scales into one instance of this chart.
+function GroupedBarChart({ data, seriesA = SERIES_KS, seriesB = SERIES_BU, valueFmt = String, yFmt = String }) {
+  const [hover, setHover] = useState(null);
+  const w = 560, h = 260, pad = { l: 72, r: 14, t: 14, b: 30 };
+  const plotW = w - pad.l - pad.r, plotH = h - pad.t - pad.b;
+
+  if (data.length === 0) return <div className="empty-state">No data to compare.</div>;
+
+  const yMax = niceMax(Math.max(1e-9, ...data.flatMap(d => [d.a, d.b])));
+  const yScale = v => pad.t + plotH - (v / yMax) * plotH;
+  const groupW = plotW / data.length;
+  const barW = Math.min(26, groupW * 0.3);
+  const gap = 3;
+
+  const bars = data.map((d, i) => {
+    const cx = pad.l + i * groupW + groupW / 2;
+    const xA = cx - barW - gap / 2, xB = cx + gap / 2;
+    const yA = yScale(d.a), yB = yScale(d.b);
+    return { ...d, cx, xA, xB, yA, yB, hA: (h - pad.b) - yA, hB: (h - pad.b) - yB };
+  });
+  const gridYs = [0, 0.25, 0.5, 0.75, 1.0].map(f => f * yMax);
+  const hb = hover !== null ? bars[hover.i] : null;
+
+  return (
+    <div className="chart-card" onMouseLeave={() => setHover(null)}>
+      <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+        {gridYs.map((gy, i) => (
+          <line key={i} className="chart-grid" x1={pad.l} x2={w - pad.r} y1={yScale(gy)} y2={yScale(gy)} />
+        ))}
+        {gridYs.map((gy, i) => (
+          <text key={i} className="chart-axis-label" x={pad.l - 8} y={yScale(gy) + 3} textAnchor="end">{yFmt(gy)}</text>
+        ))}
+        <line className="chart-baseline" x1={pad.l} x2={pad.l} y1={pad.t} y2={h - pad.b} />
+        <line className="chart-baseline" x1={pad.l} x2={w - pad.r} y1={h - pad.b} y2={h - pad.b} />
+        {bars.map((d, i) => (
+          <g key={d.label}>
+            <path d={barPath(d.xA, d.yA, barW, d.hA)} fill={seriesA.color}
+                  opacity={hover && hover.i === i && hover.s !== "a" ? 0.55 : 1}
+                  onMouseEnter={() => setHover({ i, s: "a" })} />
+            <path d={barPath(d.xB, d.yB, barW, d.hB)} fill={seriesB.color}
+                  opacity={hover && hover.i === i && hover.s !== "b" ? 0.55 : 1}
+                  onMouseEnter={() => setHover({ i, s: "b" })} />
+            <text className="chart-axis-label" x={d.cx} y={h - pad.b + 16} textAnchor="middle">{d.label}</text>
+          </g>
+        ))}
+      </svg>
+      {hb && (
+        <div className="chart-tooltip" style={{ left: Math.min(hb.cx + 8, w - 150), top: (hover.s === "a" ? hb.yA : hb.yB) - 8 }}>
+          <b>{hb.label}</b><br />
+          {(hover.s === "a" ? seriesA.name : seriesB.name)}: {valueFmt(hover.s === "a" ? hb.a : hb.b)}
+        </div>
+      )}
+      <div className="chart-legend">
+        <span className="mk"><span className="swatch" style={{ background: seriesA.color }}></span>{seriesA.name}</span>
+        <span className="mk"><span className="swatch" style={{ background: seriesB.color }}></span>{seriesB.name}</span>
+      </div>
+    </div>
+  );
+}
+
+// Numeric side-by-side comparison table. direction:"lowerBetter" colors the
+// delta (built-up cheaper/lighter = savings, green); direction:"neutral"
+// (default) leaves the delta uncolored -- most section properties don't have
+// a universally "better" direction outside the context of a specific demand.
+function CompareTable({ rows, seriesA = SERIES_KS, seriesB = SERIES_BU }) {
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th><span className="legend-key"><span className="swatch" style={{ background: seriesA.color }}></span>{seriesA.name}</span></th>
+          <th><span className="legend-key"><span className="swatch" style={{ background: seriesB.color }}></span>{seriesB.name}</span></th>
+          <th>&Delta; ({seriesB.name} vs {seriesA.name})</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(r => {
+          const deltaPct = r.a !== 0 ? ((r.b - r.a) / Math.abs(r.a)) * 100 : 0;
+          const cls = r.direction === "lowerBetter" ? (deltaPct < -0.05 ? "delta-good" : deltaPct > 0.05 ? "delta-bad" : "") : "";
+          const fmt = r.fmt || (v => v.toFixed(r.digits ?? 1));
+          return (
+            <tr key={r.label}>
+              <td>{r.label}{r.unit ? <span className="small-muted"> ({r.unit})</span> : null}</td>
+              <td>{fmt(r.a)}</td>
+              <td>{fmt(r.b)}</td>
+              <td className={cls}>{deltaPct >= 0 ? "+" : ""}{deltaPct.toFixed(1)}%</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+// One metric, two horizontal bars, each scaled to that metric's own max --
+// deliberately not a shared axis, since weight (kg/m) and Ix (cm^4) live on
+// wildly different scales; this is the small-multiples escape from that.
+function PairedBarTile({ label, unit, a, b, fmt, seriesA = SERIES_KS, seriesB = SERIES_BU }) {
+  const max = Math.max(a, b, 1e-9);
+  const f = fmt || (v => v.toFixed(1));
+  return (
+    <div className="pair-tile">
+      <div className="k">{label}{unit ? ` (${unit})` : ""}</div>
+      <div className="pair-row">
+        <span className="pair-name">{seriesA.name}</span>
+        <div className="pair-bar-wrap"><div className="pair-bar" style={{ width: (a / max) * 100 + "%", background: seriesA.color }}></div></div>
+        <span className="pair-val">{f(a)}</span>
+      </div>
+      <div className="pair-row">
+        <span className="pair-name">{seriesB.name}</span>
+        <div className="pair-bar-wrap"><div className="pair-bar" style={{ width: (b / max) * 100 + "%", background: seriesB.color }}></div></div>
+        <span className="pair-val">{f(b)}</span>
       </div>
     </div>
   );
@@ -1430,10 +1673,62 @@ function CostEstimatorTab() {
     <div className="prop-tile"><div className="k">{k}</div><div className="v">{v}<span className="u">{u}</span></div></div>
   );
 
+  const costRows = [
+    { label: "Weight", unit: "kg/m", a: ksSection.mass, b: buProps.weight, fmt: v => v.toFixed(1), direction: "lowerBetter" },
+    { label: "Total weight", unit: "kg", a: ksCost.totalWeightKg, b: buCost.totalWeightKg, fmt: v => v.toFixed(0), direction: "lowerBetter" },
+    { label: "Material cost", unit: "₩", a: ksCost.materialCost, b: buCost.materialCost, fmt: won, direction: "lowerBetter" },
+    { label: "Fabrication cost", unit: "₩", a: ksCost.fabricationCost, b: buCost.fabricationCost, fmt: won, direction: "lowerBetter" },
+    { label: "Total cost", unit: "₩", a: ksCost.totalCost, b: buCost.totalCost, fmt: won, direction: "lowerBetter" },
+    { label: "Cost / m", unit: "₩/m", a: ksCost.costPerM, b: buCost.costPerM, fmt: won, direction: "lowerBetter" },
+  ];
+  const costChartData = [
+    { label: "Material", a: ksCost.materialCost, b: buCost.materialCost },
+    { label: "Fabrication", a: ksCost.fabricationCost, b: buCost.fabricationCost },
+    { label: "Total", a: ksCost.totalCost, b: buCost.totalCost },
+  ];
+
+  const propRows = [
+    { label: "Weight", unit: "kg/m", a: ksSection.mass, b: buProps.weight, fmt: v => v.toFixed(1) },
+    { label: "Area, A", unit: "cm²", a: ksSection.A, b: buProps.A / 100, fmt: v => v.toFixed(1) },
+    { label: "Ix (strong)", unit: "cm⁴", a: ksSection.Ix, b: buProps.Ix / 1e4, fmt: v => v.toFixed(0) },
+    { label: "Iy (weak)", unit: "cm⁴", a: ksSection.Iy, b: buProps.Iy / 1e4, fmt: v => v.toFixed(0) },
+    { label: "Sx (elastic)", unit: "cm³", a: ksSection.Sx, b: buProps.Sx / 1e3, fmt: v => v.toFixed(0) },
+    { label: "Zx (plastic, approx.)", unit: "cm³", a: ksSection.Zx, b: buProps.Zx / 1e3, fmt: v => v.toFixed(0) },
+    { label: "rx / ix", unit: "cm", a: ksSection.rx, b: buProps.ix / 10, fmt: v => v.toFixed(2) },
+    { label: "ry / iy", unit: "cm", a: ksSection.ry, b: buProps.iy / 10, fmt: v => v.toFixed(2) },
+  ];
+
+  function handleExport() {
+    const inputRows = [
+      { Parameter: "Beam length, L (m)", Value: L },
+      { Parameter: "KS section", Value: ksName },
+      { Parameter: "KS steel unit price (₩/ton)", Value: rolledPricePerTon },
+      { Parameter: "KS fabrication ratio (%)", Value: rolledFabRatio },
+      { Parameter: "Built-up depth, H (mm)", Value: H },
+      { Parameter: "Built-up flange width, B (mm)", Value: B },
+      { Parameter: "Built-up web thickness, tw (mm)", Value: tw },
+      { Parameter: "Built-up flange thickness, tf (mm)", Value: tf },
+      { Parameter: "Built-up weld leg size, z (mm)", Value: z },
+      { Parameter: "Built-up steel unit price (₩/ton)", Value: builtUpPricePerTon },
+      { Parameter: "Built-up fabrication ratio (%)", Value: builtUpFabRatio },
+    ];
+    exportWorkbook(
+      `CIP_Cost_Estimator_${ksName}_vs_BH-${H}x${B}x${tw}x${tf}.xlsx`,
+      [
+        { name: "Inputs", rows: inputRows },
+        { name: "Cost Comparison", rows: compareRowsToSheet(costRows) },
+        { name: "Section Properties", rows: compareRowsToSheet(propRows) },
+      ]
+    );
+  }
+
   return (
     <div>
       <div className="panel" style={{ marginBottom: 16 }}>
-        <h2>Shared inputs</h2>
+        <div className="head-row">
+          <h2>Shared inputs</h2>
+          <button className="btn-secondary" onClick={handleExport}>Export to Excel</button>
+        </div>
         <div className="field">
           <label>Beam length, L (m)</label>
           <input type="number" value={L} onChange={e => setL(+e.target.value)} />
@@ -1450,7 +1745,7 @@ function CostEstimatorTab() {
 
       <div className="grid">
         <div className="panel">
-          <h2>KS rolled beam</h2>
+          <h2>KS rolled beam &mdash; inputs</h2>
           <div className="field">
             <label>Section</label>
             <select value={ksName} onChange={e => setKsName(e.target.value)}>
@@ -1465,18 +1760,10 @@ function CostEstimatorTab() {
             <label>Fabrication cost, ratio of material (%)</label>
             <input type="number" value={rolledFabRatio} onChange={e => setRolledFabRatio(+e.target.value)} />
           </div>
-          <div className="prop-grid">
-            {tile("Weight", ksSection.mass.toFixed(1), "kg/m")}
-            {tile("Total weight", ksCost.totalWeightKg.toFixed(0), "kg")}
-            {tile("Material cost", won(ksCost.materialCost), "₩")}
-            {tile("Fabrication cost", won(ksCost.fabricationCost), "₩")}
-            {tile("Total cost", won(ksCost.totalCost), "₩")}
-            {tile("Cost / m", won(ksCost.costPerM), "₩/m")}
-          </div>
         </div>
 
         <div className="panel">
-          <h2>Built-up beam</h2>
+          <h2>Built-up beam &mdash; inputs</h2>
           <div className="field"><label>Depth, H (mm)</label><input type="number" value={H} onChange={e => setH(+e.target.value)} /></div>
           <div className="field"><label>Flange width, B (mm)</label><input type="number" value={B} onChange={e => setB(+e.target.value)} /></div>
           <div className="row">
@@ -1492,22 +1779,46 @@ function CostEstimatorTab() {
             <label>Fabrication cost, ratio of material (%) &mdash; shop welding</label>
             <input type="number" value={builtUpFabRatio} onChange={e => setBuiltUpFabRatio(+e.target.value)} />
           </div>
-          <div className="prop-grid">
-            {tile("Weight", buProps.weight.toFixed(1), "kg/m")}
-            {tile("Total weight", buCost.totalWeightKg.toFixed(0), "kg")}
-            {tile("Material cost", won(buCost.materialCost), "₩")}
-            {tile("Fabrication cost", won(buCost.fabricationCost), "₩")}
-            {tile("Total cost", won(buCost.totalCost), "₩")}
-            {tile("Cost / m", won(buCost.costPerM), "₩/m")}
-          </div>
         </div>
       </div>
 
       <div className="panel" style={{ marginTop: 16 }}>
-        <h2>Comparison</h2>
-        <div className="prop-grid">
+        <h2>Cost comparison</h2>
+        <div className="stat-row">
           {tile("Weight savings (built-up vs. KS)", weightSavingsPct.toFixed(1), "%")}
           {tile("Cost savings (built-up vs. KS)", costSavingsPct.toFixed(1), "%")}
+        </div>
+        <div className="compare-layout">
+          <div className="table-scroll" style={{ maxHeight: "none" }}>
+            <CompareTable rows={costRows} />
+          </div>
+          <GroupedBarChart data={costChartData} valueFmt={v => "₩" + won(v)} yFmt={v => won(v)} />
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: 16 }}>
+        <h2>Section properties comparison</h2>
+        <div className="note" style={{ marginTop: 0 }}>
+          {ksName} vs. the built-up geometry entered above ({H}&times;{B}&times;{tw}&times;{tf}, z={z}mm).
+          Not colored as savings &mdash; unlike cost/weight, a smaller section property
+          isn't inherently better; check against the governing demand (Section
+          6 in the PRD / OptimizerTab) before drawing conclusions.
+        </div>
+        <div className="compare-layout">
+          <div className="table-scroll" style={{ maxHeight: "none" }}>
+            <CompareTable rows={propRows} />
+          </div>
+          <div>
+            <div className="chart-legend" style={{ marginBottom: 6 }}>
+              <span className="mk"><span className="swatch" style={{ background: SERIES_KS.color }}></span>{SERIES_KS.name}</span>
+              <span className="mk"><span className="swatch" style={{ background: SERIES_BU.color }}></span>{SERIES_BU.name}</span>
+            </div>
+            <div className="pair-grid">
+              {propRows.map(r => (
+                <PairedBarTile key={r.label} label={r.label} unit={r.unit} a={r.a} b={r.b} fmt={r.fmt} />
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>
