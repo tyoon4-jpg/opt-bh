@@ -1,0 +1,14 @@
+# Dependencies (npm ci reinstalls in CI from package-lock.json)
+node_modules/
+
+# Build output (the deploy workflow rebuilds this in CI -- see
+# .github/workflows/deploy.yml -- so a locally built copy shouldn't be
+# committed or it'll conflict with what CI produces)
+dist/
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+
+# Office lock files
+~$*.docx
