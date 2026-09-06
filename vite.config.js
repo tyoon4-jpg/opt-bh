@@ -5,7 +5,9 @@ import react from "@vitejs/plugin-react";
 // https://<user>.github.io/<repo>/ -- Vite needs `base` set to the repo
 // name so built asset URLs resolve under that subpath instead of the
 // domain root. Must match the GitHub repo name exactly (case-sensitive).
+// Repo is tyoon4-jpg/opt-bh (lowercase) -- confirmed via the "repository
+// moved" redirect GitHub returns for the old Opt-BH remote URL.
 export default defineConfig({
-  base: "/Opt-BH/",
+  base: "/opt-bh/",
   plugins: [react()],
 });
